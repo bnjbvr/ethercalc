@@ -24,11 +24,15 @@
   "bin": {
     "ethercalc": "./bin/ethercalc"
   },
+  "main": "app.js",
   "scripts": {
     "start": "node app.js",
     "prepublish": "node node_modules/LiveScript/bin/lsc -c package.json.ls || lsc -c package.json.ls || echo"
   },
   "engines": {
     "node": ">= 0.8.x"
+  },
+  "cozy-displayName": "ethercalc",
+  "cozy-permissions": {
   }
 }
