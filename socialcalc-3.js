@@ -6,7 +6,7 @@
 // All Rights Reserved.
 //
 // The contents of this file are subject to the Artistic License 2.0; you may not
-// use this file except in compliance with the License. You may obtain a copy of 
+// use this file except in compliance with the License. You may obtain a copy of
 // the License at http://socialcalc.org/licenses/al-20/.
 //
 // Some of the other files in the SocialCalc package are licensed under
@@ -294,6 +294,8 @@ SocialCalc.ResetSheet = function(sheet, reload) {
    sheet.cellformathash={};
    sheet.valueformats=[];
    sheet.valueformathash={};
+   sheet.matched_cells=[];
+   sheet.selected_search_cell=undefined;
 
    sheet.copiedfrom = ""; // if a range, then this was loaded from a saved range as clipboard content
 
@@ -315,6 +317,26 @@ SocialCalc.ResetSheet = function(sheet, reload) {
 
 SocialCalc.Sheet.prototype.ResetSheet = function() {SocialCalc.ResetSheet(this);};
 SocialCalc.Sheet.prototype.AddCell = function(newcell) {return this.cells[newcell.coord]=newcell;};
+SocialCalc.Sheet.prototype.LastCol = function() { 
+    var last_col = 1;
+    for (var cell_id  in this.cells) {
+        var cr = SocialCalc.coordToCr(cell_id);
+        if (cr.col > last_col) {
+            last_col = cr.col;
+        }
+    }
+    return last_col;
+}
+SocialCalc.Sheet.prototype.LastRow = function() { 
+    var last_row = 1;
+    for (var cell_id  in this.cells) {
+        var cr = SocialCalc.coordToCr(cell_id);
+        if (cr.row > last_row) {
+            last_row = cr.row;
+        }
+    }
+    return last_row;
+} 
 SocialCalc.Sheet.prototype.GetAssuredCell = function(coord) {
    return this.cells[coord] || this.AddCell(new SocialCalc.Cell(coord));
    };
@@ -1740,6 +1762,7 @@ SocialCalc.ExecuteSheetCommand = function(sheet, cmd, saveundo) {
    var sortfunction, slen, valtype, originalrow, sortedcr;
    var name, v1, v2;
    var cmdextension;
+   var col, row, editor, undoNum, trackLine;
 
    var attribs = sheet.attribs;
    var changes = sheet.changes;
@@ -2126,15 +2149,44 @@ SocialCalc.ExecuteSheetCommand = function(sheet, cmd, saveundo) {
          what = cmd.NextToken();
          rest = cmd.RestOfString();
          ParseRange();
+         function increment_amount(down) {
+            function valid_datatype(type) {
+		return type == "v" || type == "c";
+            }
+            var editor = SocialCalc.GetSpreadsheetControlObject().editor;
+            var range = editor.range2;
+            var returnval = undefined; 
+            if (range.hasrange) {
+                var startcell, endcell;
+                if (down && (range.bottom - range.top == 1) && range.left == range.right) {
+                  startcell = sheet.GetAssuredCell(SocialCalc.crToCoord(range.left, range.top));
+                  endcell = sheet.GetAssuredCell(SocialCalc.crToCoord(range.left, range.bottom));
+                  if (valid_datatype(startcell.datatype) && valid_datatype(endcell.datatype)) {
+                      returnval =  endcell.datavalue - startcell.datavalue;
+                  }
+                } else if (!down && range.left != range.right) {
+                  startcell = sheet.GetAssuredCell(SocialCalc.crToCoord(range.left, range.top));
+                  endcell = sheet.GetAssuredCell(SocialCalc.crToCoord(range.right, range.top));
+                  if (valid_datatype(startcell.datatype) && valid_datatype(endcell.datatype)) {
+                      returnval =  endcell.datavalue - startcell.datavalue;
+		  }
+                }
+            }
+           editor.Range2Remove();
+           return returnval;
+         }
+	 var inc;
          if (cmd1 == "fillright") {
             fillright = true;
             rowstart = cr1.row;
             colstart = cr1.col + 1;
+	    inc = increment_amount(false);
             }
          else {
             fillright = false;
             rowstart = cr1.row + 1;
             colstart = cr1.col;
+	    inc = increment_amount(true);
             }
          for (row = rowstart; row <= cr2.row; row++) {
             for (col = colstart; col <= cr2.col; col++) {
@@ -2165,7 +2217,11 @@ SocialCalc.ExecuteSheetCommand = function(sheet, cmd, saveundo) {
                      }
                   }
                if (rest == "all" || rest == "formulas") {
-                  cell.datavalue = basecell.datavalue;
+                  if (inc !== undefined) {
+                      cell.datavalue = basecell.datavalue + (fillright ? coloffset : rowoffset)*inc;
+                  } else {
+                      cell.datavalue = basecell.datavalue;
+                  }
                   cell.datatype = basecell.datatype;            
                   cell.valuetype = basecell.valuetype;
                   if (cell.datatype == "f") { // offset relative coords, even in sheet references
@@ -2563,9 +2619,12 @@ SocialCalc.ExecuteSheetCommand = function(sheet, cmd, saveundo) {
             for (col=colstart; col <= lastcol - coloffset; col++) {
                cr = SocialCalc.crToCoord(col+coloffset, row+rowoffset);
                cell = sheet.cells[cr];
-               if (cell && cell.readonly) return errortext; 
+               if (cell && cell.readonly) {
+                    errortext = "Unable to remove " + (cmd1 == "deletecol" ? "column" : "row") + ", because cell " + cell.coord + " is locked";
+                    return errortext; 
                }
             }
+         }
 
          for (row=rowstart; row <= lastrow - rowoffset; row++) { // copy the cells backwards - extra so no dup of last set
             for (col=colstart; col <= lastcol - coloffset; col++) {
@@ -2662,12 +2721,12 @@ SocialCalc.ExecuteSheetCommand = function(sheet, cmd, saveundo) {
          if (saveundo) {
             if (cmd1 == "deletecol") {
                for (col=cr1.col; col<=cr2.col; col++) {
-                  changes.AddUndo("insertcol "+SocialCalc.rcColname(col));
+                  changes.AddUndo("insertcol "+SocialCalc.rcColname(cr1.col));
                   }
                }
             else {
                for (row=cr1.row; row<=cr2.row; row++) {
-                  changes.AddUndo("insertrow "+row);
+                  changes.AddUndo("insertrow "+cr1.row);
                   }
                }
             }
@@ -3029,6 +3088,85 @@ SocialCalc.ExecuteSheetCommand = function(sheet, cmd, saveundo) {
 
       case "changedrendervalues": // needed for undo sometimes
          sheet.changedrendervalues = true;
+         break;
+
+      case "pane":
+
+         name = cmd.NextToken().toUpperCase();
+         undoNum = 1;
+         editor = SocialCalc.GetSpreadsheetControlObject().editor;
+
+         if (name.toUpperCase() === 'ROW') {
+           row = parseInt(cmd.NextToken(), 10);
+
+           if (typeof(editor.context.rowpanes[1]) !== 'undefined' && typeof(editor.context.rowpanes[1].first) === 'number') {
+             undoNum = editor.context.rowpanes[1].first;
+           }
+           if (saveundo) changes.AddUndo('pane row ' + undoNum);
+
+           // Handle hidden row.
+           while (editor.context.sheetobj.rowattribs.hide[row] == 'yes') {
+             row++;
+           }
+
+           if ((!row || row<=editor.context.rowpanes[0].first) && editor.context.rowpanes.length>1) { // set to no panes, leaving first pane settings
+             editor.context.rowpanes.length = 1;
+           } else if (editor.context.rowpanes.length-1 && !editor.timeout) { // has 2 already
+             // not waiting for position calc (so positions could be wrong)
+             editor.context.SetRowPaneFirstLast(0, editor.context.rowpanes[0].first, row-1);
+             editor.context.SetRowPaneFirstLast(1, row, row);
+           } else {
+             editor.context.SetRowPaneFirstLast(0, editor.context.rowpanes[0].first, row-1);
+             editor.context.SetRowPaneFirstLast(1, row, row);
+           }
+           
+           // remove tracklingine
+           if (editor.griddiv) {
+             //trackingline-horizon
+             trackLine = document.getElementById('trackingline-vertical');
+             if (trackLine) {
+               editor.griddiv.removeChild(trackLine);
+               editor.FitToEditTable();
+             }
+           }
+
+         } else {
+
+           col = parseInt(cmd.NextToken(), 10);
+
+           if (typeof(editor.context.colpanes[1]) !== 'undefined' && typeof(editor.context.colpanes[1].first) === 'number') {
+             undoNum = editor.context.colpanes[1].first;
+           }
+           if (saveundo) changes.AddUndo('pane col ' + undoNum);
+
+           // Handle hidden column.
+           while (editor.context.sheetobj.colattribs.hide[SocialCalc.rcColname(col)] == 'yes') {
+             col++;
+           }
+
+           if ((!col || col<=editor.context.colpanes[0].first) && editor.context.colpanes.length > 1) { // set to no panes, leaving first pane settings
+             editor.context.colpanes.length = 1;
+           } else if (editor.context.colpanes.length-1 && !editor.timeout) { // has 2 already
+             // not waiting for position calc (so positions could be wrong)
+             editor.context.SetColPaneFirstLast(0, editor.context.colpanes[0].first, col-1);
+             editor.context.SetColPaneFirstLast(1, col, col);
+           } else {
+             editor.context.SetColPaneFirstLast(0, editor.context.colpanes[0].first, col-1);
+             editor.context.SetColPaneFirstLast(1, col, col);
+           }
+
+           // remove tracklingine
+           if (editor.griddiv) {
+             trackLine = document.getElementById('trackingline-horizon');
+             if (trackLine) {
+               editor.griddiv.removeChild(trackLine);
+               editor.FitToEditTable();
+             }
+           }
+         }
+
+         sheet.renderneeded = true;
+
          break;
 
       case "startcmdextension": // startcmdextension extension rest-of-command
@@ -3541,7 +3679,7 @@ SocialCalc.RecalcTimerRoutine = function() {
    if (!sheet) {
       return;
       }
-   var recalcdata = sheet.recalcdata;
+   var recalcdata = sheet.recalcdata || (sheet.recalcdata = {});
 
    var do_statuscallback = function(status, arg) { // routine to do callback if required
       if (sheet.statuscallback) {
@@ -4096,7 +4234,9 @@ SocialCalc.RenderContext = function(sheetobj) {
    this.cellskip = {}; // if present, coord of cell covering this cell
    this.coordToCR = {}; // for cells starting spans, coordToCR[coord]={row:row, col:col}
    this.colwidth = []; // precomputed column widths, taking into account defaults
+   this.rowheight = []; // precomputed row height, taking into account defaults
    this.totalwidth = 0; // precomputed total table width
+   this.totalheight = 0; // precomputed total table height
 
    this.rowpanes = []; // for each pane, {first: firstrow, last: lastrow}
    this.colpanes = []; // for each pane, {first: firstrow, last: lastrow}
@@ -4160,7 +4300,9 @@ SocialCalc.RenderContext = function(sheetobj) {
          unhideleft: scc.defaultUnhideLeftClass,
          unhideright: scc.defaultUnhideRightClass,
          unhidetop: scc.defaultUnhideTopClass,
-         unhidebottom: scc.defaultUnhideBottomClass
+         unhidebottom: scc.defaultUnhideBottomClass,
+         colresizebar: scc.defaultColResizeBarClass,
+         rowresizebar: scc.defaultRowResizeBarClass
       };
 
    this.explicitStyles = // these may be used so you won't need a stylesheet with the classnames
@@ -4208,6 +4350,7 @@ SocialCalc.RenderContext = function(sheetobj) {
 SocialCalc.RenderContext.prototype.PrecomputeSheetFontsAndLayouts = function() {SocialCalc.PrecomputeSheetFontsAndLayouts(this);};
 SocialCalc.RenderContext.prototype.CalculateCellSkipData = function() {SocialCalc.CalculateCellSkipData(this);};
 SocialCalc.RenderContext.prototype.CalculateColWidthData = function() {SocialCalc.CalculateColWidthData(this);};
+SocialCalc.RenderContext.prototype.CalculateRowHeightData = function() {SocialCalc.CalculateRowHeightData(this);};
 SocialCalc.RenderContext.prototype.SetRowPaneFirstLast = function(panenum, first, last) {this.rowpanes[panenum]={first:first, last:last};};
 SocialCalc.RenderContext.prototype.SetColPaneFirstLast = function(panenum, first, last) {this.colpanes[panenum]={first:first, last:last};};
 SocialCalc.RenderContext.prototype.CoordInPane = function(coord, rowpane, colpane) {return SocialCalc.CoordInPane(this, coord, rowpane, colpane);};
@@ -4348,6 +4491,28 @@ SocialCalc.CalculateColWidthData = function(context) {
 
    }
 
+SocialCalc.CalculateRowHeightData = function(context) {
+  var rownum, rowheight, totalheight;
+  var sheetobj = context.sheetobj;
+
+  // Calculate row height data
+  totalheight = context.showRCHeaders ? context.pixelsPerRow : 0;
+  for (rowpane = 0; rowpane < context.rowpanes.length; rowpane++) {
+    for (rownum = context.rowpanes[rowpane].first; rownum <= context.rowpanes[rowpane].last; rownum++) {
+      if (sheetobj.rowattribs.hide[rownum] === "yes") {
+        context.rowheight[rownum] = 0;
+      } else {
+        rowheight = sheetobj.rowattribs.height[rownum] || sheetobj.attribs.defaultrowheight || SocialCalc.Constants.defaultAssumedRowHeight;
+        if (rowheight === "blank" || rowheight === "auto") rowheight = "";
+        context.rowheight[rownum] = rowheight+"";
+        totalheight += (rowheight && ((rowheight - 0) > 0)) ? (rowheight-0) : 10;
+      }
+    }
+  }
+  context.totalheight = totalheight;
+
+}
+
 SocialCalc.InitializeTable = function(context, tableobj) {
 
 /*
@@ -4411,6 +4576,7 @@ SocialCalc.RenderSheet = function(context, oldtable, linkstyle) {
       }
 
    context.CalculateColWidthData(); // always make sure col width values are up to date
+   context.CalculateRowHeightData();
 
    // make the table element and fill it in
 
@@ -4463,6 +4629,7 @@ SocialCalc.RenderRow = function(context, rownum, rowpane, linkstyle) {
       if (context.classnames) newcol.className=context.classnames.rowname;
       if (context.explicitStyles) newcol.style.cssText=context.explicitStyles.rowname;
       newcol.width=context.rownamewidth;
+      newcol.height = context.rowheight[rownum];
       newcol.style.verticalAlign="top"; // to get around Safari making top of centered row number be
                                         // considered top of row (and can't get <row> position in Safari)
       newcol.innerHTML=rownum+"";
@@ -4476,6 +4643,9 @@ SocialCalc.RenderRow = function(context, rownum, rowpane, linkstyle) {
          var unhide = document.createElement("div");
          if (context.classnames) unhide.className=context.classnames.unhidetop;
          if (context.explicitStyles) unhide.style.cssText=context.explicitStyles.unhidetop;
+         var fixPosition = ((context.rowheight[rownum] - 0) - SocialCalc.Constants.defaultAssumedRowHeight);
+         fixPosition = (fixPosition === 0) ? 4 : fixPosition;
+         unhide.style.bottom = '-' + fixPosition + 'px';
          context.rowunhidetop[rownum] = unhide;
          container.appendChild(unhide);
          newcol.appendChild(container);
@@ -4487,6 +4657,11 @@ SocialCalc.RenderRow = function(context, rownum, rowpane, linkstyle) {
          context.rowunhidebottom[rownum] = unhide;
          newcol.appendChild(unhide);
          }
+
+      // add resize bar
+      var resizeBar = document.createElement('div');
+      resizeBar.className = context.classnames.rowresizebar;
+      newcol.appendChild(resizeBar);
 
       result.appendChild(newcol);
       }
@@ -4591,14 +4766,20 @@ SocialCalc.RenderColHeaders = function(context) {
             if (context.explicitStyles) unhide.style.cssText=context.explicitStyles.unhideleft;
             context.colunhideleft[colnum] = unhide;
             newcol.appendChild(unhide);
-            }
+         }
          if (colnum > 1 && sheetobj.colattribs.hide[SocialCalc.rcColname(colnum-1)] == "yes") {
             unhide = document.createElement("div");
             if (context.classnames) unhide.className=context.classnames.unhideright;
             if (context.explicitStyles) unhide.style.cssText=context.explicitStyles.unhideright;
             context.colunhideright[colnum] = unhide;
             newcol.appendChild(unhide);
-            }
+         }
+
+         // add resize bar
+         var resizeBar = document.createElement('span');
+         resizeBar.style.height = SocialCalc.Constants.defaultAssumedRowHeight + 'px';
+         resizeBar.className = context.classnames.colresizebar;
+         newcol.appendChild(resizeBar);
 
          result.appendChild(newcol);
          }
@@ -4869,9 +5050,11 @@ SocialCalc.RenderCell = function(context, rownum, colnum, rowpane, colpane, noEl
    result.style.cssText=stylestr;
 
    //!!!!!!!!!
-   // NOTE: csss and cssc are not supported yet.
+   // NOTE: csss is not supported yet.
    // csss needs to be parsed into pieces to override just the attributes specified, not all with assignment to cssText.
-   // cssc just needs to set the className.
+   if (cell.cssc !== undefined) {
+      noElement ? (result.className = (result.className ? result.className + ' ' : '') + cell.cssc) : result.classList.add(cell.cssc);
+   }
 
    t = context.highlights[coord];
    if (t) { // this is a highlit cell: Override style appropriately
@@ -5533,10 +5716,10 @@ SocialCalc.DetermineValueType = function(rawvalue) {
       value = tvalue.replace(/[\$,]/g, "") - 0;
       type = "n$";
       }
-   else if (matches=value.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{1,4})\s*$/)) { // MM/DD/YYYY, MM/DD/YYYY
+   else if (matches=value.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{1,4})\s*$/)) { // MM-DD-YYYY, MM/DD/YYYY
       year = matches[3] - 0;
       year = year < 1000 ? year + 2000 : year;
-      value = SocialCalc.FormatNumber.convert_date_gregorian_to_julian(year, matches[1]-0, matches[2]-0)-2415019;
+      value = ((navigator.language).indexOf("fr") === 0)  ? (SocialCalc.FormatNumber.convert_date_gregorian_to_julian(year, matches[2]-0, matches[1]-0)-2415019) : (SocialCalc.FormatNumber.convert_date_gregorian_to_julian(year, matches[1]-0, matches[2]-0)-2415019);
       type = "nd";
       }
    else if (matches=value.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})\s*$/)) { // YYYY-MM-DD, YYYY/MM/DD

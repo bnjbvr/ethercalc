@@ -8,6 +8,9 @@
   @include \player-graph
   @include \player
 
+  J = require \j
+  csv-parse = require \csv-parse
+
   DB = @include \db
   SC = @include \sc
 
@@ -25,8 +28,10 @@
     text/plain text/html text/csv application/json
   ]>.map (+ "; charset=utf-8")
 
+  require! <[ fs ]>
   const RealBin = require \path .dirname do
-    require \fs .realpathSync __filename
+    fs.realpathSync __filename
+  const DevMode = fs.existsSync "#RealBin/.git"
 
   sendFile = (file) -> ->
     @response.type Html
@@ -41,41 +46,86 @@
       return res.send(204) if req?method is \OPTIONS
       next!
 
-  new-room = -> require \uuid-pure .newId 10 36 .toLowerCase!
+  new-room = -> require \uuid-pure .newId 12 36 .toLowerCase!
 
   @get '/': sendFile \index.html
   @get '/favicon.ico': -> @response.send 404 ''
   @get '/manifest.appcache': ->
     @response.type \text/cache-manifest
-    @response.sendfile "#RealBin/manifest.appcache"
+    if DevMode
+      @response.send 200 "CACHE MANIFEST\n\n##{Date!}\n\nNETWORK:\n*\n"
+    else
+      @response.sendfile "#RealBin/manifest.appcache"
+  @get '/static/socialcalc:part.js': ->
+    part = @params.part
+    @response.type \application/javascript
+    @response.sendfile "#RealBin/socialcalc#part.js"
+  @get '/static/form:part.js': ->
+    part = @params.part
+    @response.type \application/javascript
+    @response.sendfile "#RealBin/form#part.js"
+  @get '/=_new': ->
+    room = new-room!
+    @response.redirect if KEY then "#BASEPATH/=#room/edit" else "#BASEPATH/=#room"
   @get '/_new': ->
     room = new-room!
     @response.redirect if KEY then "#BASEPATH/#room/edit" else "#BASEPATH/#room"
   @get '/_start': sendFile \start.html
 
   IO = @io
-  api = (cb) -> ->
-    room = encodeURIComponent @params.room
-    {snapshot} <~ SC._get room, IO
-    if snapshot
-      [type, content] = cb.call @params, snapshot
-      if type is Csv
+  api = (cb, cb-multiple) -> ->
+    room = encodeURIComponent(@params.room).replace(/%3A/g \:)
+    if room is /^%3D/ and cb-multiple
+      room.=slice 3
+      {snapshot} <~ SC._get room, IO
+      unless snapshot
+        _, default-snapshot <~ DB.get "snapshot-#room.1"
+        unless default-snapshot
+          @response.type Text
+          @response.send 404 ''
+          return
+        [type, content] = cb-multiple.call @params, <[ Sheet1 ]>, [ default-snapshot ]
+        @response.type type
         @response.set \Content-Disposition """
-          attachment; filename="#{ @params.room }.csv"
+          attachment; filename="#room.xlsx"
         """
-      if content instanceof Function
-        rv <~ content SC[room]
-        @response.type type
-        @response.send 200 rv
-      else
-        @response.type type
         @response.send 200 content
+        return
+      csv <~ SC[room].exportCSV
+      _, body <~ csv-parse(csv, delimiter: \,)
+      body.shift! # header
+      todo = DB.multi!
+      names = []
+      for [link, title], idx in body | link and title and link is /^\//
+        names ++= title
+        todo.=get "snapshot-#{ link.slice(1) }"
+      _, saves <~ todo.exec!
+      [type, content] = cb-multiple.call @params, names, saves
+      @response.type type
+      @response.set \Content-Disposition """
+        attachment; filename="#room.xlsx"
+      """
+      @response.send 200 content
     else
-      @response.type Text
-      @response.send 404 ''
+      {snapshot} <~ SC._get room, IO
+      if snapshot
+        [type, content] = cb.call @params, snapshot
+        if type is Csv
+          @response.set \Content-Disposition """
+            attachment; filename="#{ @params.room }.csv"
+          """
+        if content instanceof Function
+          rv <~ content SC[room]
+          @response.type type
+          @response.send 200 rv
+        else
+          @response.type type
+          @response.send 200 content
+      else
+        @response.type Text
+        @response.send 404 ''
 
   ExportCSV-JSON = api -> [Json, (sc, cb) ->
-    csv-parse = require \csv-parse
     csv <- sc.exportCSV
     _, body <- csv-parse(csv, delimiter: \,)
     cb body
@@ -86,21 +136,38 @@
   J-TypeMap =
     md: \text/x-markdown
     xlsx: \application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
-  Export-J = (type) -> api ->
-    J = require \j
+    ods: \application/vnd.oasis.opendocument.spreadsheet
+  Export-J = (type) -> api (-> # single
     rv = J.utils["to_#type"](J.read it)
     rv = rv.Sheet1 if rv?Sheet1?
     [J-TypeMap[type], rv]
+  ), ((names, saves) -> # multi
+    input = [ null, { SheetNames: names, Sheets: {} } ]
+    for save, idx in saves
+      [harb, { Sheets: { Sheet1 } }] = J.read save
+      input.0 ||= harb
+      input.1.Sheets[names[idx]] = Sheet1
+    rv = J.utils["to_#type"](input)
+    [J-TypeMap[type], rv]
+  )
 
   ExportExcelXML = api ->
 
   @get '/:room.csv': ExportCSV
   @get '/:room.csv.json': ExportCSV-JSON
   @get '/:room.html': ExportHTML
+  #@get '/:room.ods': Export-J \ods
   @get '/:room.xlsx': Export-J \xlsx
   @get '/:room.md': Export-J \md
-
-
+  if @CORS
+     @get '/_rooms' : ->
+        @response.type Text
+        return @response.send 403 '_rooms not available with CORS'
+  else
+     @get '/_rooms' : ->
+        rooms <~ SC._rooms 
+        @response.type \application/json
+        @response.json 200 rooms
   @get '/_from/:template': ->
     room = new-room!
     template = @params.template
@@ -108,12 +175,18 @@
     {snapshot} <~ SC._get template, IO
     <~ SC._put room, snapshot
     @response.redirect if KEY then "#BASEPATH/#room/edit" else "#BASEPATH/#room"
+  @get '/_exists/:room' : ->
+    exists <~ SC._exists @params.room
+    @response.type \application/json
+    @response.json (exists === 1)
 
-  @get '/:room':
-    if KEY then ->
-      | @query.auth?length  => sendFile \index.html .call @
-      | otherwise       => @response.redirect "#BASEPATH/#{ @params.room }?auth=0"
-    else sendFile \index.html
+  @get '/:room': ->
+    ui-file = if @params.room is /^=/ then \multi/index.html else \index.html
+    if KEY then
+      if @query.auth?length
+        sendFile(ui-file).call @
+      else @response.redirect "#BASEPATH/#{ @params.room }?auth=0"
+    else sendFile(ui-file).call @
   @get '/:room/edit': ->
     room = @params.room
     @response.redirect "#BASEPATH/#room?auth=#{ hmac room }"
@@ -129,6 +202,7 @@
   @get '/_/:room/html': ExportHTML
   @get '/_/:room/csv': ExportCSV
   @get '/_/:room/csv.json': ExportCSV-JSON
+  #@get '/_/:room/ods': Export-J \ods
   @get '/_/:room/xlsx': Export-J \xlsx
   @get '/_/:room/md': Export-J \md
   @get '/_/:room': api -> [Text, it]
@@ -141,9 +215,11 @@
     <~ request.on \end
     buf = Buffer.concat cs
     return cb buf.toString(\utf8) if request.is \text/x-socialcalc
-    J = require \j
+    return cb buf.toString(\utf8) if request.is \text/plain
     # TODO: Move to thread
     for k, save of (J.utils.to_socialcalc(J.read buf) || {'': ''})
+      save.=replace /[\d\D]*?\ncell:/ 'cell:'
+      save.=replace /\s--SocialCalcSpreadsheetControlSave--[\d\D]*/ '\n'
       save.=replace /\\/g "\\b" if ~save.index-of "\\"
       save.=replace /:/g  "\\c" if ~save.index-of ":"
       save.=replace /\n/g "\\n" if ~save.index-of "\n"
@@ -157,10 +233,36 @@
     <~ request.on \end
     buf = Buffer.concat cs
     return cb buf.toString(\utf8) if request.is \text/x-socialcalc
-    J = require \j
     # TODO: Move to thread
     for k, save of (J.utils.to_socialcalc(J.read buf) || {'': ''})
       return cb save
+
+  for route in <[ /=:room.xlsx /_/=:room/xlsx ]> => @put "#route": ->
+    room = encodeURIComponent(@params.room).replace(/%3A/g \:)
+    cs = []; @request.on \data (chunk) ~> cs ++= chunk
+    <~ @request.on \end
+    buf = Buffer.concat cs
+    idx = 0
+    toc = '#url,#title\n'
+    parsed = J.utils.to_socialcalc J.read buf
+    sheets-to-idx = {}
+    res = []
+    for k of parsed
+      idx++
+      sheets-to-idx[k] = idx
+      toc += "\"/#{ @params.room.replace(/"/g, '""') }.#idx\","
+      toc += "\"#{ k.replace(/"/g, '""') }\"\n"
+      res.push k.replace(/'/g, "''").replace(/(\W)/g, '\\$1')
+    { Sheet1 } = J.utils.to_socialcalc J.read toc
+    todo = DB.multi!set("snapshot-#room", Sheet1)
+    for k, save of parsed
+      idx = sheets-to-idx[k]
+      save.=replace //('?)\b(#{ res.join('|') })\1!//g, (,, ref) ~>
+        "'#{ @params.room.replace(/'/g, "''") }.#{
+          sheets-to-idx[ref.replace(/''/g, "'")] }'!"
+      todo.=set("snapshot-#room.#idx", save)
+    todo.bgsave!.exec!
+    @response.send 201 \OK
 
   @put '/_/:room': ->
     @response.type Text
@@ -190,6 +292,19 @@
         command := [command, "insertrow A#row", "paste A#row all"]
       else
         command := [command, "paste A#row all"]
+    if command is /^set\s+(A\d+):B\d+\s+empty\s+multi-cascade/
+      _, [snapshot] <~ DB.multi!get("snapshot-#room").exec
+      if snapshot
+        sheetId = RegExp.$1
+        matches = snapshot.match(new RegExp("cell:#sheetId:t:\/(.+)\n", "i"));
+        if matches
+            removeKey = matches[1]
+            backupKey = "#{matches[1]}.bak"
+            _ <~ DB.multi!
+              .del("snapshot-#backupKey").rename("snapshot-#removeKey", "snapshot-#backupKey")
+              .del("log-#backupKey").rename("log-#removeKey", "log-#backupKey")
+              .del("audit-#backupKey").rename("audit-#removeKey", "audit-#backupKey")
+              .bgsave!.exec
     command := [command] unless Array.isArray command
     cmdstr = command * \\n
     <~ DB.multi!
@@ -207,6 +322,14 @@
     @response.type Text
     @response.location "/_/#room"
     @response.send 201 "/#room"
+
+  @delete '/_/:room': ->
+    @response.type Text
+    {room} = @params
+    SC[room]?terminate!
+    delete SC[room]
+    <~ SC._del room
+    @response.send 201 \OK
 
   @on disconnect: !->
     { id } = @socket

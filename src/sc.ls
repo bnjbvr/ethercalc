@@ -36,6 +36,9 @@ bootSC += """;(#{->
 IsThreaded = true
 Worker = try
   throw \vm if argv.vm
+  if parseInt(process.versions.node.slice(2)) > 10 or parseInt(process.versions.node[0])
+    console.log "Note: Threading with Node #{ process.versions.node } is work in progress.\n=>> https://github.com/audreyt/node-webworker-threads/issues/48"
+    throw \too-new
   console.log "Starting backend using webworker-threads"
   (require \webworker-threads).Worker
 catch
@@ -68,7 +71,7 @@ Worker ||= class => (code) ->
   DB = @include \db
   EXPIRE = @EXPIRE
 
-  SC.csv-to-save = (csv, cb) ->
+  SC._csv-to-save = (csv, cb) ->
     w = new Worker
     <- w.thread.eval bootSC
     (,rv) <- w.thread.eval "SocialCalc.ConvertOtherFormatToSave(#{ JSON.stringify csv }, 'csv')"
@@ -84,7 +87,6 @@ Worker ||= class => (code) ->
     if (snapshot or log.length) and io
       SC[room] = SC._init snapshot, log, DB, room, io
     cb {log, snapshot}
-
   SC._put = (room, snapshot, cb) ->
     return cb?! unless snapshot
     <~ DB.multi!
@@ -93,7 +95,21 @@ Worker ||= class => (code) ->
       .bgsave!exec!
     DB.expire "snapshot-#room", EXPIRE if EXPIRE
     cb?!
-
+  SC._del = (room, cb) ->
+    <~ DB.multi!
+       .del ["snapshot-#room", "log-#room" "chat-#room" "ecell-#room" "audit-#room"]
+       .bgsave!exec!
+    cb?!
+  SC._rooms = (cb) ->
+    (, [rooms]) <~ DB.multi!
+       .keys \snapshot-*
+       .exec!
+    cb [ ..replace(/^snapshot-/, "") for rooms]
+  SC._exists = (room, cb) ->
+    (, [x]) <~ DB.multi!
+       .exists "snapshot-#room"
+       .exec!
+       cb x
   SC._init = (snapshot, log=[], DB, room, io) ->
     if SC[room]?
       SC[room]._doClearCache!
@@ -119,14 +135,14 @@ Worker ||= class => (code) ->
       | \exportCells
         postMessage { type: \cells, cells: window.ss.cells }
       | \init
-        SocialCalc.SaveEditorSettings = -> ""
         SocialCalc.CreateAuditString = -> ""
         SocialCalc.CalculateEditorPositions = ->
         SocialCalc.Popup.Types.List.Create = ->
         SocialCalc.Popup.Types.ColorChooser.Create = ->
         SocialCalc.Popup.Initialize = ->
         SocialCalc.RecalcInfo.LoadSheet = (ref) ->
-          ref = "#ref".replace(/[^a-zA-Z0-9]+/g '')toLowerCase!
+          return if ref is /[^.a-zA-Z0-9]/
+          ref.=toLowerCase!
           postMessage { type: \load-sheet, ref }
           return true
         window.setTimeout = (cb, ms) -> thread.next-tick cb
@@ -142,9 +158,12 @@ Worker ||= class => (code) ->
           return if ss._snapshot is newSnapshot
           ss._snapshot = newSnapshot
           postMessage { type: \snapshot, snapshot: newSnapshot }
-        if parts?sheet
-          ss.sheet.ResetSheet!
-          ss.ParseSheetSave snapshot.substring parts.sheet.start, parts.sheet.end
+        if parts?
+          if parts.sheet
+            ss.sheet.ResetSheet!
+            ss.ParseSheetSave snapshot.substring parts.sheet.start, parts.sheet.end
+          if parts.edit
+            ss.editor.LoadEditorSettings snapshot.substring parts.edit.start, parts.edit.end
         cmdstr = [ line for line in log
              | not /^re(calc|display)$/.test(line) ].join("\n")
         cmdstr += "\n" if cmdstr.length
